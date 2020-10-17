@@ -309,6 +309,28 @@ func (p *Polygon) AddV2Set(x []V2) {
 	}
 }
 
+// AddV2Set adds one or more V2 vertices to a polygon at a specified position.
+func (p *Polygon) AddV2At(idx int, x ...V2) {
+	// make a new vertex list
+	vsToAdd := len(x)
+	vl := make([]PolygonVertex, vsToAdd + len(p.vlist))
+
+	// merge old and new vertices
+	for i := 0; i < len(vl); i++ {
+		if i < idx {
+			vl[i] = p.vlist[i]
+		} else if i < idx + vsToAdd {
+			pv := PolygonVertex{}
+			pv.vtype = pvNormal
+			pv.vertex = x[i - idx]
+			vl[i] = pv
+		} else {
+			vl[i] = p.vlist[i - vsToAdd]
+		}
+	}
+	p.vlist = vl
+}
+
 // Add an x,y vertex to a polygon.
 func (p *Polygon) Add(x, y float64) *PolygonVertex {
 	return p.AddV2(V2{x, y})

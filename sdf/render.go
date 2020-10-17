@@ -70,7 +70,15 @@ func RenderSTLSlow(
 
 	// run marching cubes to generate the triangle mesh
 	m := marchingCubes(s, bb, meshInc)
-	err := SaveSTL(path, m)
+
+	// simplify the resulting mesh
+	simplified, err := simplifyMesh(m, meshInc, epsilon)
+	if err != nil {
+		fmt.Printf("Error during mesh simplification: %s\n", err)
+	} else {
+		m = simplified
+	}
+	err = SaveSTL(path, m)
 	if err != nil {
 		fmt.Printf("%s", err)
 	}
