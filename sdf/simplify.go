@@ -300,7 +300,6 @@ func removeVertices(
 		if err != nil {
 			return nil, err
 		}
-		fmt.Println("POLYGON WITH HOLES COMING")
 	}
 
 	t, err := triangulate(toTriangulate)
@@ -367,12 +366,18 @@ func mergeHoles(p *Polygon, holes []*Polygon) (*Polygon, error) {
 			return nil, err
 		}
 
-		// merge the hole in immediately after the visible vertex
-		result.AddV2At(vIdx + 1, holeVs...)
+		if outerV.Sub(holeVs[0]).Length() < epsilon {
+			// special case: hole touches the outer perimeter.
+			// no need to close any polygons; we'll just insert one vertex earlier
+			result.AddV2At(vIdx, holeVs...)
+		} else {
+			// merge the hole in immediately after the visible vertex
+			result.AddV2At(vIdx + 1, holeVs...)
 
-		// close the inner hole and connect back to the outer polygon
-		result.AddV2At(vIdx + len(holeVs) + 1, holeVs[0])
-		result.AddV2At(vIdx + len(holeVs) + 2, outerV)
+			// close the inner hole and connect back to the outer polygon
+			result.AddV2At(vIdx + len(holeVs) + 1, holeVs[0])
+			result.AddV2At(vIdx + len(holeVs) + 2, outerV)
+		}
 	}
 
 	return result, nil
@@ -386,6 +391,11 @@ func findVisibleVertex(poly *Polygon, m V2) (V2, int, error) {
 	closestIntersectionX := math.MaxFloat64
 	closestIntersectionIdx := -1
 	for i, v1 := range verts {
+		if v1.Sub(m).Length() < epsilon {
+			// special case: hole touches the outer perimeter
+			return v1, i, nil
+		}
+
 		j := (i + 1) % len(verts)
 		v2 := verts[j]
 
@@ -401,39 +411,43 @@ func findVisibleVertex(poly *Polygon, m V2) (V2, int, error) {
 				a := r.Cross(s)
 				b := v1.Sub(m).Cross(r)
 
-				if Abs(a) < epsilon && Abs(b) < epsilon {
-					// Both are colinear. Given that m should be a vertex of a hole in poly,
-					// this can only happen if both v1 and v2 are to the right of m.
-					// We will then return the closer of the two.
-					if v1.X < v2.X && v1.X > m.X {
-						if v1.X < closestIntersectionX {
-							closestIntersectionX = v1.X
-							closestIntersectionIdx = i
-						}
-					} else if v2.X < v1.X && v2.X > m.X {
-						if v2.X < closestIntersectionX {
-							closestIntersectionX = v2.X
-							closestIntersectionIdx = j
+				if Abs(a) < epsilon {
+					if Abs(b) < epsilon {
+						// Both are colinear. Given that m should be a vertex of a hole in poly,
+						// this can only happen if both v1 and v2 are to the right of m.
+						// We will then return the closer of the two.
+						if v1.X < v2.X && v1.X > m.X {
+							if v1.X < closestIntersectionX {
+								closestIntersectionX = v1.X
+								closestIntersectionIdx = i
+							}
+						} else if v2.X < v1.X && v2.X > m.X {
+							if v2.X < closestIntersectionX {
+								closestIntersectionX = v2.X
+								closestIntersectionIdx = j
+							}
+						} else {
+							// This shouldn't happen if our polygons are well-formed.
+							return V2{}, 0, fmt.Errorf(
+								"Collinear vertices %f and %f on both sides of point %f",
+								v1, v2, m,
+							)
 						}
 					} else {
-						// This shouldn't happen if our polygons are well-formed.
+						// Parallel and non-intersecting. Given our prior check that the segment
+						// crosses in Y-direction, this shouldn't happen.
 						return V2{}, 0, fmt.Errorf(
-							"Collinear vertices %f and %f on both sides of point %f",
+							"Segment between %f and %f doesn't intersect with %f",
 							v1, v2, m,
 						)
 					}
-				} else if Abs(a) < epsilon && Abs(b) > epsilon {
-					// Parallel and non-intersecting. Given our prior check that the segment
-					// crosses in Y-direction, this shouldn't happen.
-					return V2{}, 0, fmt.Errorf(
-						"Segment between %f and %f doesn't intersect with %f",
-						v1, v2, m,
-					)
-				} else if Abs(a) > epsilon {
+				} else {
+					// compute the intersection point
 					t := v1.Sub(m).Cross(s) / a
 					u := b / a
 
-					// compute the intersection point (two ways to be sure)
+					// compute the intersection from both starting points.
+					// That way we can check that they are equal (it's cheap)
 					i1 := m.Add(r.MulScalar(t))
 					i2 := v1.Add(s.MulScalar(u))
 					if i1.Sub(i2).Length() > epsilon {
@@ -442,9 +456,14 @@ func findVisibleVertex(poly *Polygon, m V2) (V2, int, error) {
 							i1, i2, v1, v2, m,
 						)
 					}
-					if i1.X < closestIntersectionX {
+					if i1.X > m.X && i1.X < closestIntersectionX {
 						closestIntersectionX = i1.X
-						closestIntersectionIdx = i
+						// return the endpoint with larger X value
+						if v2.X > v1.X {
+							closestIntersectionIdx = j
+						} else {
+							closestIntersectionIdx = i
+						}
 					}
 				}
 
@@ -461,11 +480,17 @@ func findVisibleVertex(poly *Polygon, m V2) (V2, int, error) {
 
 	p := verts[closestIntersectionIdx]
 	i := V2{closestIntersectionX, m.Y}
+	if p.Sub(i).Length() < epsilon {
+		// no point checking if there are any points inside a triangle if we
+		// found a colinear point (rather than an edge)
+		return verts[closestIntersectionIdx], closestIntersectionIdx, nil
+	}
+
 	// Check if any points lie inside the triangle (m, p, i)
 	var insidePoints []int
 	for idx, x := range verts {
 		if idx != closestIntersectionIdx {
-			if triangleContains(m, p, i, x) {
+			if triangleContainsIgnoreCornerPoints(m, p, i, x) {
 				insidePoints = append(insidePoints, idx)
 			}
 		}
@@ -507,6 +532,16 @@ func triangleContains(a, b, c, p V2) bool {
     return true
 }
 
+func triangleContainsIgnoreCornerPoints(a, b, c, p V2) bool {
+	if !triangleContains(a, b, c, p) {
+		return false
+	}
+	if p.Sub(a).Length() < epsilon || p.Sub(b).Length() < epsilon || p.Sub(c).Length() < epsilon {
+		return false
+	}
+	return true
+}
+
 func isReflex(a, b, c V2) bool {
 	return (b.X-a.X)*(c.Y-b.Y)-(c.X-b.X)*(b.Y-a.Y) < 0
 }
@@ -544,7 +579,11 @@ func triangulate(p *Polygon) ([]Triangle2, error) {
 				pointInside := false
 				for j := 0; j < len(verts) - 3; j++ {
 					checkIdx := (i + 2 + j) % len(verts)
-					if reflexVerts[checkIdx] && triangleContains(vPrev, v, vNext, verts[checkIdx]) {
+
+					// due to the way we resolve holes we ignore vertices touching one of the
+					// corner points. Perhaps using Seidel's algorithm would help here.
+					if (reflexVerts[checkIdx] &&
+						triangleContainsIgnoreCornerPoints(vPrev, v, vNext, verts[checkIdx])) {
 						pointInside = true
 						break
 					}
@@ -572,7 +611,7 @@ func triangulate(p *Polygon) ([]Triangle2, error) {
 			reflexVerts[idx1] = isReflex(verts[idx0], verts[idx1], verts[idx2])
 			reflexVerts[idx2] = isReflex(verts[idx1], verts[idx2], verts[idx3])
 		} else {
-			return nil, fmt.Errorf("Could not find ear. Vertices: %f", verts)
+			return nil, fmt.Errorf("Could not find ear. Vertices: %f reflex: %v", verts, reflexVerts)
 		}
 	}
 	return result, nil
