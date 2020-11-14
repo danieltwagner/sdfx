@@ -31,16 +31,19 @@ func simplifyMesh(m []*Triangle3, meshInc, tolerance float64) ([]*Triangle3, err
 	triToFace := make(map[int]int)        // triangle index to face index
 	faceToTris := make(map[int][]int)     // face index to triangle index
 
-	for i, t := range m {
+	for triIdx, t := range m {
 		for _, v := range t.V {
-			v3iToTriangles[v3ToV3i(v, meshInc)] = append(v3iToTriangles[v3ToV3i(v, meshInc)], i)
+			v3i := v3ToV3i(v, meshInc)
+			v3iToTriangles[v3i] = append(v3iToTriangles[v3i], triIdx)
 		}
-		faces[i] = append(faces[i], t)
-		triToFace[i] = i
-		faceToTris[i] = []int{i}
+		faces[triIdx] = append(faces[triIdx], t)
+		triToFace[triIdx] = triIdx
+		faceToTris[triIdx] = []int{triIdx}
 	}
 
-	for i, t := range m {
+	fmt.Println("Identifying faces...")
+
+	for triIdx, t := range m {
 		// Find all neighbors for each triangle (triangles that share at least one vertex) ...
 		allNeighbors := make(map[int]bool)
 		for _, v := range t.V {
@@ -50,9 +53,9 @@ func simplifyMesh(m []*Triangle3, meshInc, tolerance float64) ([]*Triangle3, err
 		}
 
 		// ... and merge into a face if they share an edge and normal.
-		thisFace := triToFace[i]
+		thisFace := triToFace[triIdx]
 		for n, _ := range allNeighbors {
-			if n == i {
+			if n == triIdx {
 				continue // each triangle is incident to its own vertices
 			}
 			if shareEdgeAndNormal(t, m[n], tolerance) {
@@ -60,11 +63,8 @@ func simplifyMesh(m []*Triangle3, meshInc, tolerance float64) ([]*Triangle3, err
 				if otherFace == thisFace {
 					continue
 				}
-				// move all triangles from otherFace to this face
-				faces[thisFace] = append(faces[thisFace], faces[otherFace]...)
-				faces[otherFace] = nil
 
-				// update index-based data structures
+				// move all triangles from otherFace to this face
 				for _, o := range faceToTris[otherFace] {
 					triToFace[o] = thisFace
 				}
@@ -74,6 +74,8 @@ func simplifyMesh(m []*Triangle3, meshInc, tolerance float64) ([]*Triangle3, err
 		}
 	}
 
+	fmt.Println("Identifying interior edges...")
+
 	// Now that we have identified the faces, remove all edges that are not needed to describe
 	// the shape. That is, remove edges where all incident triangles belong to one face (those
 	// are inner edges within a single plane). Also remove vertices where all incident triangles
@@ -81,11 +83,11 @@ func simplifyMesh(m []*Triangle3, meshInc, tolerance float64) ([]*Triangle3, err
 	// meaning they are coplanar in both faces and therefore colinear along the edge).
 	innerEdges := make(map[EdgeV3i]bool)
 	extraEdgeVertices := make(map[V3i]bool)
-	for i, t := range m {
-		for j, v := range t.V {
+	for triIdx, t := range m {
+		for vIdx, v := range t.V {
 			v3i := v3ToV3i(v, meshInc)
 
-			// Check if this is an extra edge vertice
+			// Check if this is a colinear edge vertice
 			allIncidentTris := v3iToTriangles[v3i]
 			facesOfIncidentTris := make(map[int]bool)
 			for _, t := range allIncidentTris {
@@ -101,11 +103,11 @@ func simplifyMesh(m []*Triangle3, meshInc, tolerance float64) ([]*Triangle3, err
 				extraEdgeVertices[v3i] = true
 			}
 
-			// Check if this is an inner edge
-			nextV := t.V[(j + 1) % 3]
+			// Check if (v, nextV) is an inner edge
+			nextV := t.V[(vIdx + 1) % 3]
 			nextV3i := v3ToV3i(nextV, meshInc)
 			allIncidentTrisNextV := v3iToTriangles[nextV3i]
-			if isInnerEdge(i, allIncidentTris, allIncidentTrisNextV, triToFace) {
+			if isInnerEdge(triIdx, allIncidentTris, allIncidentTrisNextV, triToFace) {
 				innerEdges[EdgeV3i{v3i, nextV3i}] = true
 			}
 		}
@@ -114,12 +116,16 @@ func simplifyMesh(m []*Triangle3, meshInc, tolerance float64) ([]*Triangle3, err
 
 	cnt := 0
 	var result []*Triangle3
-	for _, tris := range faces {
-		if len(tris) == 1 {
-			result = append(result, tris...)
+	for _, triIdxs := range faceToTris {
+		if len(triIdxs) == 1 {
+			result = append(result, m[triIdxs[0]])
 			cnt++
-		} else if len(tris) > 1 {
-			reduced, err := removeVertices(tris, innerEdges, extraEdgeVertices, meshInc)
+		} else if len(triIdxs) > 1 {
+			var faceTris []*Triangle3
+			for _, triIdx := range triIdxs {
+				faceTris = append(faceTris, m[triIdx])
+			}
+			reduced, err := removeVertices(faceTris, innerEdges, extraEdgeVertices, meshInc)
 			if err != nil {
 				return nil, err
 			}
@@ -134,14 +140,14 @@ func simplifyMesh(m []*Triangle3, meshInc, tolerance float64) ([]*Triangle3, err
 }
 
 func isInnerEdge(tri int, incidentTrisFirstV, incidentTrisNextV []int, triToFace map[int]int) bool {
-	for _, i := range incidentTrisFirstV {
-		if i == tri {
+	for _, incidentTriFirstV := range incidentTrisFirstV {
+		if incidentTriFirstV == tri {
 			continue
 		}
-		for _, j := range incidentTrisNextV {
-			if i == j {
+		for _, incidentTriNextV := range incidentTrisNextV {
+			if incidentTriFirstV == incidentTriNextV {
 				// We found another triangle that shares this edge
-				if triToFace[i] != triToFace[tri] {
+				if triToFace[incidentTriFirstV] != triToFace[tri] {
 					return false
 				}
 			}
@@ -170,7 +176,7 @@ func shareEdgeAndNormal(t1 *Triangle3, t2 *Triangle3, tolerance float64) bool {
 
 func v3ToV3i(v V3, meshInc float64) V3i {
 	// given a mesh increment, turn a floating point vertex into an integer
-	// vertex such that there are hopefully few collisions
+	// vertex such that there are hopefully no collisions
 	return V3i{int(v.X / meshInc * 100.0), int(v.Y / meshInc * 100.0), int(v.Z / meshInc * 100.0)}
 }
 
@@ -181,13 +187,13 @@ func removeVertices(
 	meshInc float64,
 ) ([]*Triangle3, error) {
 
-	// Step 1: Remove inner vertices only
+	// Step 1: Remove all edges that lie within the plane
 	// Create an index of vertices to edges that we want to keep
 	vToEs := make(map[V3i][]EdgeV3)
 	for _, t := range m {
-		for i, v := range t.V {
+		for vIdx, v := range t.V {
 			v3i := v3ToV3i(v, meshInc)
-			nextV := t.V[(i + 1) % 3]
+			nextV := t.V[(vIdx + 1) % 3]
 			nextV3i := v3ToV3i(nextV, meshInc)
 			if !innerEdges[EdgeV3i{v3i, nextV3i}] {
 				vToEs[v3i] = append(vToEs[v3i], EdgeV3{v, nextV})
@@ -206,15 +212,6 @@ func removeVertices(
 	if origin.Equals(xDirection, epsilon) {
 		return nil, fmt.Errorf("first triangle is degenerate, can't form plane: %s", m[0])
 	}
-
-	// // Pick a reference point that isn't origin so we can form two axes on our plane
-	// var xDirection V3
-	// for _, edges := range vToEs {
-	// 	if edges[0].Start.Sub(origin).Length() > epsilon {
-	// 		xDirection = edges[0].Start
-	// 		break
-	// 	}
-	// }
 
 	planeXaxis := xDirection.Sub(origin).Normalize()
 	planeYaxis := normal.Cross(planeXaxis).Normalize()
